@@ -14,7 +14,7 @@
 
         <meta-data
             android:name="xposeddescription"
-            android:value="Fuerza AudioAttributes y AudioFocus en inDrive para que suene en Android Auto." />
+            android:value="Fuerza AudioAttributes, AudioFocus y MediaSession en inDrive para que el audio funcione en Android Auto, incluso cuando la app está en segundo plano." />
 
         <!-- Mínimo de API legacy de Xposed (82) -->
         <meta-data

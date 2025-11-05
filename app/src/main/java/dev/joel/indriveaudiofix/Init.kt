@@ -1,12 +1,19 @@
 package dev.joel.indriveaudiofix
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Context
 import android.media.*
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
+import android.os.Build
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
+import java.lang.ref.WeakReference
 
 class Init : IXposedHookLoadPackage {
 
@@ -23,6 +30,11 @@ class Init : IXposedHookLoadPackage {
 
     // Si inDrive intentara “modo llamada” (SCO) que rompa AA, puedes bloquearlo
     private val SUPPRESS_IN_COMM_MODE = false
+    
+    // MediaSession para Android Auto
+    private var mediaSession: WeakReference<MediaSession>? = null
+    private val NOTIFICATION_ID = 9876
+    private val CHANNEL_ID = "indrive_audio_fix"
 
     override fun handleLoadPackage(lpp: XC_LoadPackage.LoadPackageParam) {
         if (lpp.packageName !in targetPkgs) return
@@ -115,6 +127,9 @@ class Init : IXposedHookLoadPackage {
             }
         }
 
+        // 6) Hook MediaPlayer.start() para crear/activar MediaSession para Android Auto
+        hookMediaPlayerForAndroidAuto(lpp)
+
         XposedBridge.log("InDriveAudioFix: hooks loaded in ${lpp.packageName}")
     }
 
@@ -161,4 +176,172 @@ class Init : IXposedHookLoadPackage {
 
     private fun getPlayerContext(player: Any): Context? =
         runCatching { XposedHelpers.getObjectField(player, "mContext") as? Context }.getOrNull()
+    
+    // Hooks adicionales para MediaSession y Android Auto
+    private fun hookMediaPlayerForAndroidAuto(lpp: XC_LoadPackage.LoadPackageParam) {
+        val mpClass = XposedHelpers.findClass("android.media.MediaPlayer", lpp.classLoader)
+        
+        // Hook para start() - crear/activar MediaSession
+        XposedHelpers.findAndHookMethod(mpClass, "start", object : XC_MethodHook() {
+            override fun beforeHookedMethod(p: MethodHookParam) {
+                try {
+                    val ctx = getPlayerContext(p.thisObject)
+                    if (ctx != null) {
+                        ensureMediaSessionActive(ctx)
+                        updatePlaybackState(PlaybackState.STATE_PLAYING)
+                    }
+                } catch (e: Throwable) {
+                    XposedBridge.log("InDriveAudioFix: Error in start() hook: ${e.message}")
+                }
+            }
+        })
+        
+        // Hook para pause()
+        XposedHelpers.findAndHookMethod(mpClass, "pause", object : XC_MethodHook() {
+            override fun afterHookedMethod(p: MethodHookParam) {
+                try {
+                    updatePlaybackState(PlaybackState.STATE_PAUSED)
+                } catch (e: Throwable) {
+                    XposedBridge.log("InDriveAudioFix: Error in pause() hook: ${e.message}")
+                }
+            }
+        })
+        
+        // Hook para stop() - mantener MediaSession pero actualizar estado
+        XposedHelpers.findAndHookMethod(mpClass, "stop", object : XC_MethodHook() {
+            override fun afterHookedMethod(p: MethodHookParam) {
+                try {
+                    updatePlaybackState(PlaybackState.STATE_STOPPED)
+                } catch (e: Throwable) {
+                    XposedBridge.log("InDriveAudioFix: Error in stop() hook: ${e.message}")
+                }
+            }
+        })
+    }
+    
+    private fun ensureMediaSessionActive(context: Context) {
+        val session = mediaSession?.get()
+        if (session != null && session.isActive) {
+            return // Ya existe y está activa
+        }
+        
+        try {
+            // Crear nueva MediaSession
+            val newSession = MediaSession(context, "InDriveAudioFix")
+            
+            // Configurar para Android Auto
+            newSession.setFlags(
+                MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or
+                MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS
+            )
+            
+            // Configurar AudioAttributes para la sesión
+            val audioAttributes = AudioAttributes.Builder()
+                .setUsage(TARGET_USAGE)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+            
+            newSession.setPlaybackToLocal(audioAttributes)
+            
+            // Configurar callbacks básicos
+            newSession.setCallback(object : MediaSession.Callback() {
+                override fun onPlay() {
+                    XposedBridge.log("InDriveAudioFix: MediaSession onPlay()")
+                }
+                
+                override fun onPause() {
+                    XposedBridge.log("InDriveAudioFix: MediaSession onPause()")
+                }
+                
+                override fun onStop() {
+                    XposedBridge.log("InDriveAudioFix: MediaSession onStop()")
+                }
+            })
+            
+            // Activar la sesión
+            newSession.isActive = true
+            mediaSession = WeakReference(newSession)
+            
+            // Intentar crear notificación para mantener el contexto activo
+            runCatching {
+                createNotificationChannel(context)
+                startForegroundNotification(context)
+            }
+            
+            XposedBridge.log("InDriveAudioFix: MediaSession created and activated")
+        } catch (e: Throwable) {
+            XposedBridge.log("InDriveAudioFix: Error creating MediaSession: ${e.message}")
+        }
+    }
+    
+    private fun updatePlaybackState(state: Int) {
+        val session = mediaSession?.get() ?: return
+        
+        try {
+            val playbackState = PlaybackState.Builder()
+                .setState(state, PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1.0f)
+                .setActions(
+                    PlaybackState.ACTION_PLAY or
+                    PlaybackState.ACTION_PAUSE or
+                    PlaybackState.ACTION_STOP or
+                    PlaybackState.ACTION_PLAY_PAUSE
+                )
+                .build()
+            
+            session.setPlaybackState(playbackState)
+            XposedBridge.log("InDriveAudioFix: PlaybackState updated to $state")
+        } catch (e: Throwable) {
+            XposedBridge.log("InDriveAudioFix: Error updating playback state: ${e.message}")
+        }
+    }
+    
+    private fun createNotificationChannel(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                val channel = NotificationChannel(
+                    CHANNEL_ID,
+                    "InDrive Audio",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Mantiene el audio activo en Android Auto"
+                    setShowBadge(false)
+                }
+                notificationManager.createNotificationChannel(channel)
+            } catch (e: Throwable) {
+                XposedBridge.log("InDriveAudioFix: Error creating notification channel: ${e.message}")
+            }
+        }
+    }
+    
+    private fun startForegroundNotification(context: Context) {
+        try {
+            val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Notification.Builder(context, CHANNEL_ID)
+            } else {
+                @Suppress("DEPRECATION")
+                Notification.Builder(context)
+            }.apply {
+                setContentTitle("InDrive Audio Activo")
+                setContentText("Audio en reproducción para Android Auto")
+                setSmallIcon(android.R.drawable.ic_media_play)
+                setOngoing(true)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    val session = mediaSession?.get()
+                    if (session != null) {
+                        setStyle(Notification.MediaStyle().setMediaSession(session.sessionToken))
+                    }
+                }
+            }.build()
+            
+            // Intentar encontrar un servicio activo para poner la notificación
+            runCatching {
+                val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                notificationManager.notify(NOTIFICATION_ID, notification)
+                XposedBridge.log("InDriveAudioFix: Notification posted")
+            }
+        } catch (e: Throwable) {
+            XposedBridge.log("InDriveAudioFix: Error creating notification: ${e.message}")
+        }
+    }
 }
