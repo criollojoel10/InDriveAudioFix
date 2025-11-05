@@ -32,7 +32,9 @@ class Init : IXposedHookLoadPackage {
     private val SUPPRESS_IN_COMM_MODE = false
     
     // MediaSession para Android Auto
+    @Volatile
     private var mediaSession: WeakReference<MediaSession>? = null
+    private val sessionLock = Any()
     private val NOTIFICATION_ID = 9876
     private val CHANNEL_ID = "indrive_audio_fix"
 
@@ -220,18 +222,21 @@ class Init : IXposedHookLoadPackage {
     }
     
     private fun ensureMediaSessionActive(context: Context) {
-        val session = mediaSession?.get()
-        if (session != null && session.isActive) {
-            return // Ya existe y está activa
-        }
-        
-        try {
-            // Limpiar sesión anterior si existe pero no está activa
-            if (session != null && !session.isActive) {
-                try {
-                    session.release()
-                } catch (_: Throwable) {}
+        synchronized(sessionLock) {
+            val session = mediaSession?.get()
+            if (session != null && session.isActive) {
+                return // Ya existe y está activa
             }
+            
+            try {
+                // Limpiar sesión anterior si existe pero no está activa
+                if (session != null && !session.isActive) {
+                    try {
+                        session.release()
+                    } catch (e: Throwable) {
+                        XposedBridge.log("InDriveAudioFix: Error releasing previous session: ${e.message}")
+                    }
+                }
             
             // Crear nueva MediaSession
             val newSession = MediaSession(context, "InDriveAudioFix")
@@ -276,29 +281,32 @@ class Init : IXposedHookLoadPackage {
             }
             
             XposedBridge.log("InDriveAudioFix: MediaSession created and activated")
-        } catch (e: Throwable) {
-            XposedBridge.log("InDriveAudioFix: Error creating MediaSession: ${e.message}")
+            } catch (e: Throwable) {
+                XposedBridge.log("InDriveAudioFix: Error creating MediaSession: ${e.message}")
+            }
         }
     }
     
     private fun updatePlaybackState(state: Int) {
-        val session = mediaSession?.get() ?: return
-        
-        try {
-            val playbackState = PlaybackState.Builder()
-                .setState(state, PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1.0f)
-                .setActions(
-                    PlaybackState.ACTION_PLAY or
-                    PlaybackState.ACTION_PAUSE or
-                    PlaybackState.ACTION_STOP or
-                    PlaybackState.ACTION_PLAY_PAUSE
-                )
-                .build()
+        synchronized(sessionLock) {
+            val session = mediaSession?.get() ?: return
             
-            session.setPlaybackState(playbackState)
-            XposedBridge.log("InDriveAudioFix: PlaybackState updated to $state")
-        } catch (e: Throwable) {
-            XposedBridge.log("InDriveAudioFix: Error updating playback state: ${e.message}")
+            try {
+                val playbackState = PlaybackState.Builder()
+                    .setState(state, PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1.0f)
+                    .setActions(
+                        PlaybackState.ACTION_PLAY or
+                        PlaybackState.ACTION_PAUSE or
+                        PlaybackState.ACTION_STOP or
+                        PlaybackState.ACTION_PLAY_PAUSE
+                    )
+                    .build()
+                
+                session.setPlaybackState(playbackState)
+                XposedBridge.log("InDriveAudioFix: PlaybackState updated to $state")
+            } catch (e: Throwable) {
+                XposedBridge.log("InDriveAudioFix: Error updating playback state: ${e.message}")
+            }
         }
     }
     
@@ -341,7 +349,7 @@ class Init : IXposedHookLoadPackage {
                 }
             }.build()
             
-            // Intentar encontrar un servicio activo para poner la notificación
+            // Publicar notificación para mantener el contexto de MediaSession
             runCatching {
                 val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                 notificationManager.notify(NOTIFICATION_ID, notification)
