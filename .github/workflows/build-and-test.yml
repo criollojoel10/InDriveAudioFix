@@ -92,6 +92,6 @@ jobs:
         uses: dorny/test-reporter@v1
         with:
           name: Test Results
-          path: 'app/build/test-results/test*/*.xml'
+          path: 'app/build/test-results/**/TEST-*.xml'
           reporter: java-junit
           fail-on-error: false
