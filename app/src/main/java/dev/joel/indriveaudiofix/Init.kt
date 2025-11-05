@@ -226,6 +226,13 @@ class Init : IXposedHookLoadPackage {
         }
         
         try {
+            // Limpiar sesión anterior si existe pero no está activa
+            if (session != null && !session.isActive) {
+                try {
+                    session.release()
+                } catch (_: Throwable) {}
+            }
+            
             // Crear nueva MediaSession
             val newSession = MediaSession(context, "InDriveAudioFix")
             
@@ -265,7 +272,7 @@ class Init : IXposedHookLoadPackage {
             // Intentar crear notificación para mantener el contexto activo
             runCatching {
                 createNotificationChannel(context)
-                startForegroundNotification(context)
+                createMediaNotification(context)
             }
             
             XposedBridge.log("InDriveAudioFix: MediaSession created and activated")
@@ -314,7 +321,7 @@ class Init : IXposedHookLoadPackage {
         }
     }
     
-    private fun startForegroundNotification(context: Context) {
+    private fun createMediaNotification(context: Context) {
         try {
             val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 Notification.Builder(context, CHANNEL_ID)
