@@ -58,16 +58,11 @@ class Init : IXposedHookLoadPackage {
             hookAudioAttributes(lpp)
             hookMediaPlayer(lpp)
             hookSoundPool(lpp)
-            
-            if (REQUEST_TRANSIENT_FOCUS) {
-                hookAudioFocus(lpp)
-            }
+            hookAudioFocus(lpp)
             
             if (SUPPRESS_IN_COMM_MODE) {
                 hookAudioMode(lpp)
             }
-            
-            hookMediaPlayerForAndroidAuto(lpp)
             
             logInfo("Hooks cargados exitosamente en ${lpp.packageName}")
         } catch (e: Throwable) {
@@ -164,7 +159,7 @@ class Init : IXposedHookLoadPackage {
     }
 
     /**
-     * Hook para manejar Audio Focus en start()/stop()/release()
+     * Hook para manejar Audio Focus y MediaSession en start()/pause()/stop()/release()
      */
     private fun hookAudioFocus(lpp: XC_LoadPackage.LoadPackageParam) {
         try {
@@ -173,29 +168,62 @@ class Init : IXposedHookLoadPackage {
                 lpp.classLoader
             )
             
+            // Hook start() para audio focus y MediaSession
             XposedHelpers.findAndHookMethod(
                 mediaPlayerClass,
                 "start",
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        requestTransientFocus(param.thisObject)
+                        if (REQUEST_TRANSIENT_FOCUS) {
+                            requestTransientFocus(param.thisObject)
+                        }
+                        getPlayerContext(param.thisObject)?.let { context ->
+                            ensureMediaSessionActive(context)
+                            updatePlaybackState(PlaybackState.STATE_PLAYING)
+                        }
                     }
                 }
             )
             
-            listOf("stop", "release").forEach { methodName ->
-                XposedHelpers.findAndHookMethod(
-                    mediaPlayerClass,
-                    methodName,
-                    object : XC_MethodHook() {
-                        override fun afterHookedMethod(param: MethodHookParam) {
+            // Hook pause() para MediaSession
+            XposedHelpers.findAndHookMethod(
+                mediaPlayerClass,
+                "pause",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        updatePlaybackState(PlaybackState.STATE_PAUSED)
+                    }
+                }
+            )
+            
+            // Hook stop() para audio focus y MediaSession
+            XposedHelpers.findAndHookMethod(
+                mediaPlayerClass,
+                "stop",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (REQUEST_TRANSIENT_FOCUS) {
+                            abandonFocus(param.thisObject)
+                        }
+                        updatePlaybackState(PlaybackState.STATE_STOPPED)
+                    }
+                }
+            )
+            
+            // Hook release() para audio focus
+            XposedHelpers.findAndHookMethod(
+                mediaPlayerClass,
+                "release",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (REQUEST_TRANSIENT_FOCUS) {
                             abandonFocus(param.thisObject)
                         }
                     }
-                )
-            }
+                }
+            )
         } catch (e: Throwable) {
-            logError("Error al hookear AudioFocus", e)
+            logError("Error al hookear MediaPlayer", e)
         }
     }
 
@@ -222,56 +250,6 @@ class Init : IXposedHookLoadPackage {
             )
         } catch (e: Throwable) {
             logError("Error al hookear AudioMode", e)
-        }
-    }
-
-    /**
-     * Hooks para MediaPlayer para crear y actualizar MediaSession
-     */
-    private fun hookMediaPlayerForAndroidAuto(lpp: XC_LoadPackage.LoadPackageParam) {
-        try {
-            val mediaPlayerClass = XposedHelpers.findClass(
-                "android.media.MediaPlayer",
-                lpp.classLoader
-            )
-            
-            // Hook start() para crear/activar MediaSession
-            XposedHelpers.findAndHookMethod(
-                mediaPlayerClass,
-                "start",
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        getPlayerContext(param.thisObject)?.let { context ->
-                            ensureMediaSessionActive(context)
-                            updatePlaybackState(PlaybackState.STATE_PLAYING)
-                        }
-                    }
-                }
-            )
-            
-            // Hook pause()
-            XposedHelpers.findAndHookMethod(
-                mediaPlayerClass,
-                "pause",
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        updatePlaybackState(PlaybackState.STATE_PAUSED)
-                    }
-                }
-            )
-            
-            // Hook stop()
-            XposedHelpers.findAndHookMethod(
-                mediaPlayerClass,
-                "stop",
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        updatePlaybackState(PlaybackState.STATE_STOPPED)
-                    }
-                }
-            )
-        } catch (e: Throwable) {
-            logError("Error al hookear MediaPlayer para Android Auto", e)
         }
     }
 
