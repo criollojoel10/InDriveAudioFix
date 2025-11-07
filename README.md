@@ -84,7 +84,7 @@ InDriveAudioFix/
 
 ### Tecnologías utilizadas
 
-- **Kotlin** 1.9.0
+- **Kotlin** 1.9.25
 - **Android Gradle Plugin** 8.1.1
 - **Gradle** 8.0
 - **Xposed API** 82

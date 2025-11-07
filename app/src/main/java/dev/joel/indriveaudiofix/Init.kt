@@ -481,28 +481,33 @@ class Init : IXposedHookLoadPackage {
      * Asegura que el canal de notificación esté creado
      */
     private fun ensureNotificationChannel(context: Context) {
+        // Double-checked locking para evitar race conditions
         if (notificationChannelCreated) return
         
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            try {
-                val notificationManager = context.getSystemService(
-                    Context.NOTIFICATION_SERVICE
-                ) as? NotificationManager ?: return
-                
-                val channel = NotificationChannel(
-                    CHANNEL_ID,
-                    "InDrive Audio",
-                    NotificationManager.IMPORTANCE_LOW
-                ).apply {
-                    description = "Mantiene el audio activo en Android Auto"
-                    setShowBadge(false)
+        synchronized(sessionLock) {
+            if (notificationChannelCreated) return
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                try {
+                    val notificationManager = context.getSystemService(
+                        Context.NOTIFICATION_SERVICE
+                    ) as? NotificationManager ?: return
+                    
+                    val channel = NotificationChannel(
+                        CHANNEL_ID,
+                        "InDrive Audio",
+                        NotificationManager.IMPORTANCE_LOW
+                    ).apply {
+                        description = "Mantiene el audio activo en Android Auto"
+                        setShowBadge(false)
+                    }
+                    
+                    notificationManager.createNotificationChannel(channel)
+                    notificationChannelCreated = true
+                    logInfo("Canal de notificación creado")
+                } catch (e: Throwable) {
+                    logError("Error al crear canal de notificación", e)
                 }
-                
-                notificationManager.createNotificationChannel(channel)
-                notificationChannelCreated = true
-                logInfo("Canal de notificación creado")
-            } catch (e: Throwable) {
-                logError("Error al crear canal de notificación", e)
             }
         }
     }
