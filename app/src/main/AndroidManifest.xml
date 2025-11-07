@@ -5,7 +5,8 @@
     <application
         android:label="InDrive Audio Fix"
         android:allowBackup="false"
-        android:supportsRtl="true">
+        android:supportsRtl="true"
+        android:theme="@style/Theme.InDriveAudioFix">
 
         <!-- Metadatos (legacy) para Xposed/LSPosed -->
         <meta-data
