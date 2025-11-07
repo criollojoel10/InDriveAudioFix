@@ -1,24 +1,21 @@
-name: Build and Test
+name: Build Debug APK
 
 on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
-    inputs:
-      build_type:
-        description: 'Build type'
-        required: false
-        default: 'debug'
-        type: choice
-        options:
-          - debug
-          - release
-          - both
 
 jobs:
   build:
-    name: Build APK
+    name: Build APK Debug
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     
     steps:
       - name: Checkout code
@@ -35,28 +32,30 @@ jobs:
         run: chmod +x gradlew
       
       - name: Build Debug APK
-        if: ${{ github.event.inputs.build_type == 'debug' || github.event.inputs.build_type == 'both' }}
         run: ./gradlew assembleDebug --no-daemon --stacktrace
       
-      - name: Build Release APK
-        if: ${{ github.event.inputs.build_type == 'release' || github.event.inputs.build_type == 'both' }}
-        run: ./gradlew assembleRelease --no-daemon --stacktrace
-      
       - name: Upload Debug APK
-        if: ${{ github.event.inputs.build_type == 'debug' || github.event.inputs.build_type == 'both' }}
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: app/build/outputs/apk/debug/*.apk
-          retention-days: 30
+          name: app-debug-${{ github.sha }}
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 90
       
-      - name: Upload Release APK
-        if: ${{ github.event.inputs.build_type == 'release' || github.event.inputs.build_type == 'both' }}
-        uses: actions/upload-artifact@v4
+      - name: Get APK info
+        id: apk_info
+        run: |
+          APK_SIZE=$(du -h app/build/outputs/apk/debug/app-debug.apk | cut -f1)
+          echo "size=$APK_SIZE" >> $GITHUB_OUTPUT
+          echo "APK Size: $APK_SIZE"
+      
+      - name: Create Release on Tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
         with:
-          name: app-release
-          path: app/build/outputs/apk/release/*.apk
-          retention-days: 30
+          files: app/build/outputs/apk/debug/app-debug.apk
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   test:
     name: Run Tests
@@ -86,17 +85,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
+          name: test-results-${{ github.sha }}
           path: |
             app/build/reports/tests/
             app/build/test-results/
           retention-days: 30
-      
-      - name: Publish Test Report
-        if: always()
-        uses: dorny/test-reporter@v1
-        with:
-          name: Test Results
-          path: 'app/build/test-results/**/TEST-*.xml'
-          reporter: java-junit
-          fail-on-error: false
+

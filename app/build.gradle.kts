@@ -6,7 +6,7 @@ plugins {
 android {
     namespace = "dev.joel.indriveaudiofix"
 
-    // Ajuste a nivel soportado por AGP actual (8.1.1) para evitar warnings
+    // Android Gradle Plugin 8.1.1 es compatible con Gradle 8.0+
     compileSdk = 34
 
     defaultConfig {
