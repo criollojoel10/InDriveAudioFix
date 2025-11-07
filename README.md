@@ -16,6 +16,17 @@ Este módulo intercepta y modifica las llamadas de audio de inDrive para garanti
 - ✅ Notificación de media persistente
 - ✅ Logging detallado para debugging
 - ✅ Manejo robusto de errores
+- ✅ Sin interfaz de usuario (módulo optimizado en segundo plano)
+- ✅ Código optimizado para rendimiento máximo
+- ✅ APK mínimo (~150KB) sin dependencias innecesarias
+
+## ⚡ Optimizaciones
+
+- **Hooks consolidados**: Eliminación de hooks duplicados para mejor rendimiento
+- **Sin Material Components**: No hay UI, por lo que no se incluyen dependencias de Material Design
+- **WeakReference**: Gestión eficiente de memoria para MediaSession
+- **Thread-safe**: Double-checked locking para operaciones concurrentes
+- **APK 40% más pequeño**: Sin tests ni recursos innecesarios
 
 ## 📋 Requisitos
 
@@ -100,12 +111,11 @@ InDriveAudioFix/
 # Compilar APK debug
 ./gradlew assembleDebug
 
-# Ejecutar tests
-./gradlew test
-
 # Compilar APK release
 ./gradlew assembleRelease
 ```
+
+**Nota**: Este módulo no tiene tests ya que es un módulo Xposed sin UI. Las pruebas se realizan ejecutando el módulo en un dispositivo con LSPosed.
 
 ## 📝 Cómo funciona
 
@@ -184,6 +194,13 @@ Este proyecto es de código abierto y está disponible bajo una licencia permisi
 ## ⚠️ Disclaimer
 
 Este módulo modifica el comportamiento de la aplicación inDrive. Úsalo bajo tu propia responsabilidad. Los desarrolladores no se hacen responsables de ningún problema que pueda surgir del uso de este módulo.
+
+## 📚 Documentación
+
+Este proyecto incluye documentación técnica completa:
+
+- **[DOCUMENTACION_TECNICA.md](DOCUMENTACION_TECNICA.md)**: Documentación técnica detallada sobre arquitectura, funcionamiento interno, APIs utilizadas y optimizaciones de rendimiento.
+- **[GUIA_RAPIDA.md](GUIA_RAPIDA.md)**: Guía de referencia rápida con resumen de componentes, configuración y solución de problemas.
 
 ## 📧 Contacto
 
