@@ -160,6 +160,11 @@ class Init : IXposedHookLoadPackage {
 
     /**
      * Hook para manejar Audio Focus y MediaSession en start()/pause()/stop()/release()
+     * 
+     * Esta función consolidada maneja:
+     * - Audio Focus: Solicita/abandona focus transitorio (si REQUEST_TRANSIENT_FOCUS está habilitado)
+     * - MediaSession: Crea y mantiene sesión activa para Android Auto (siempre)
+     * - PlaybackState: Actualiza el estado de reproducción (siempre)
      */
     private fun hookAudioFocus(lpp: XC_LoadPackage.LoadPackageParam) {
         try {
