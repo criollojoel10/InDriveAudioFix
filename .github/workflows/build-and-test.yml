@@ -1,18 +1,14 @@
-name: Build Debug APK
+name: Build and Release
 
 on:
   push:
-    branches:
-      - main
-      - develop
-  pull_request:
-    branches:
-      - main
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build APK Debug
+    name: Build APK Release
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -31,63 +27,23 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
       
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+      - name: Build Release APK
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
       
-      - name: Upload Debug APK
+      - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-${{ github.sha }}
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: app-release
+          path: app/build/outputs/apk/release/app-release.apk
           retention-days: 90
       
-      - name: Get APK info
-        id: apk_info
-        run: |
-          APK_SIZE=$(du -h app/build/outputs/apk/debug/app-debug.apk | cut -f1)
-          echo "size=$APK_SIZE" >> $GITHUB_OUTPUT
-          echo "APK Size: $APK_SIZE"
-      
-      - name: Create Release on Tag
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Create Release
         uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/v')
         with:
-          files: app/build/outputs/apk/debug/app-debug.apk
+          files: app/build/outputs/apk/release/app-release.apk
           generate_release_notes: true
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  test:
-    name: Run Tests
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      checks: write
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-          cache: gradle
-      
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
-      
-      - name: Run Unit Tests
-        run: ./gradlew test --no-daemon --stacktrace
-      
-      - name: Upload Test Results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results-${{ github.sha }}
-          path: |
-            app/build/reports/tests/
-            app/build/test-results/
-          retention-days: 30
-

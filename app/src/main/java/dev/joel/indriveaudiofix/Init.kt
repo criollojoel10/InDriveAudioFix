@@ -262,14 +262,12 @@ class Init : IXposedHookLoadPackage {
      * Corrige AudioAttributes para usar el USAGE correcto
      */
     private fun fixAudioAttributes(attributes: AudioAttributes): AudioAttributes {
-        return if (attributes.usage == AudioAttributes.USAGE_MEDIA || 
-                   attributes.usage == TARGET_USAGE) {
-            attributes
-        } else {
-            AudioAttributes.Builder(attributes)
-                .setUsage(TARGET_USAGE)
-                .build()
+        if (attributes.usage == TARGET_USAGE) {
+            return attributes
         }
+        return AudioAttributes.Builder(attributes)
+            .setUsage(TARGET_USAGE)
+            .build()
     }
 
     /**
