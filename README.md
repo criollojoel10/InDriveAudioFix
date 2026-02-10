@@ -25,6 +25,20 @@ Short description: consolidated repository following the OpenClaw project templa
 <!-- TREE_START -->
 ```text
 .
+├── CAMBIOS.md
+├── CHANGELOG.md
+├── DOCUMENTACION_TECNICA.md
+├── GUIA_RAPIDA.md
+├── README.md
+├── app
+├── app-debug.apk
+├── build.gradle.kts
+├── gradle
+├── gradle.properties
+├── gradlew
+├── gradlew.bat
+├── settings.gradle.kts
+├── sysgit.py
 ```
 <!-- TREE_END -->
 
