@@ -1,3 +1,12 @@
+# InDriveAudioFix
+
+Standardized README for the InDriveAudioFix repository.
+
+## Project structure
+- README.md
+- CHANGELOG.md
+- sysgit.py / sysup.py
+
 # $(basename "$(pwd)")
 
 Short description: consolidated repository following the OpenClaw project template.
