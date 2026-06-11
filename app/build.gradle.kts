@@ -5,16 +5,14 @@ plugins {
 
 android {
     namespace = "dev.joel.indriveaudiofix"
-
-    // Android Gradle Plugin 8.1.1 es compatible con Gradle 8.0+
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "dev.joel.indriveaudiofix"
         minSdk = 26
-        targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        targetSdk = 35
+        versionCode = 2
+        versionName = "2.0.0"
     }
 
     buildTypes {
@@ -24,11 +22,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // Reutiliza debug signing para facilitar instalación manual
             signingConfig = signingConfigs.getByName("debug")
         }
         debug {
-            // Mantener sin minify para inspección en LSPosed
             isMinifyEnabled = false
         }
     }
@@ -39,7 +35,7 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 
-    // Evita empaquetar recursos innecesarios (limpia el APK aún más)
+    // Limpia el APK de metadatos innecesarios
     packagingOptions {
         resources {
             excludes += setOf(
@@ -52,7 +48,7 @@ android {
 }
 
 dependencies {
-    // Xposed API (solo tiempo de compilación; no se empaqueta)
+    // Xposed API (compileOnly — no se empaqueta en el APK)
     compileOnly("de.robv.android.xposed:api:82")
     compileOnly("de.robv.android.xposed:api:82:sources")
 }

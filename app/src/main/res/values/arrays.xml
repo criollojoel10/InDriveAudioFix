@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Scope de LSPosed: solo inDrive (conductor) -->
     <string-array name="xposed_scope">
         <item>sinet.startup.inDriver</item>
     </string-array>

@@ -1,55 +1,114 @@
-name: Build and Release
+name: Build & Release
 
 on:
   push:
     branches:
-      - main
-      - develop
+      - master
     tags:
       - 'v*'
   pull_request:
     branches:
-      - main
+      - master
   workflow_dispatch:
+    inputs:
+      version_name:
+        description: 'Version name (e.g., 2.0.0)'
+        required: false
+        default: ''
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
 
 jobs:
   build:
-    name: Build APK Release
+    name: 🔨 Build APK
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    
+
     steps:
-      - name: Checkout code
+      - name: 📥 Checkout
         uses: actions/checkout@v4
-      
-      - name: Set up JDK 17
+        with:
+          fetch-depth: 0
+
+      - name: ☕ Setup JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
           cache: gradle
-      
-      - name: Grant execute permission for gradlew
+
+      - name: ⚙️ Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: 🔑 Grant permission
         run: chmod +x gradlew
-      
-      - name: Build Release APK
+
+      - name: 🔨 Build Debug APK
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: 🔨 Build Release APK (minified)
         run: ./gradlew assembleRelease --no-daemon --stacktrace
-      
-      - name: Upload Release APK
+
+      - name: 📦 Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-release
+          name: InDriveAudioFix-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 90
+
+      - name: 📦 Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: InDriveAudioFix-release
           path: app/build/outputs/apk/release/app-release.apk
           retention-days: 90
-      
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
+
+      - name: 🏷️ Extract version
+        id: get_version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: 🚀 Create Release
+        uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
-          files: app/build/outputs/apk/release/app-release.apk
+          name: "InDriveAudioFix v${{ steps.get_version.outputs.version }}"
+          body: |
+            ## 📱 InDriveAudioFix v${{ steps.get_version.outputs.version }}
+
+            ### Cambios
+            Ver [CHANGELOG.md](CHANGELOG.md) para detalles completos.
+
+            ### Archivos
+            - `InDriveAudioFix-debug.apk` — Para instalación directa (sin minify)
+            - `InDriveAudioFix-release.apk` — Versión optimizada (con minify)
+
+            ### Instalación
+            1. Descarga el APK
+            2. Instálalo en tu dispositivo
+            3. Activa el módulo en LSPosed
+            4. Selecciona **inDrive** como app objetivo
+            5. Reinicia inDrive
+
+            ### Soporte
+            - Reporta issues en: https://github.com/criollojoel10/InDriveAudioFix/issues
+          files: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/release/app-release.apk
           generate_release_notes: true
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,11 +1,6 @@
-// Top-level build file where you can add configuration options common to all sub-projects/modules.
-buildscript {
-    repositories {
-        google()
-        mavenCentral()
-    }
-    dependencies {
-        classpath("com.android.tools.build:gradle:8.1.1")
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.25")
-    }
+// Top-level build file
+plugins {
+    // Usar AGP 8.1.1 (compatible con Gradle 8.0+ y JDK 17)
+    id("com.android.application") version "8.1.1" apply false
+    id("org.jetbrains.kotlin.android") version "1.9.25" apply false
 }

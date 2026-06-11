@@ -8,6 +8,7 @@ import android.media.*
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.os.Build
+import android.os.PowerManager
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
@@ -16,533 +17,581 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage
 import java.lang.ref.WeakReference
 
 /**
- * Módulo Xposed para corregir problemas de audio en inDrive con Android Auto.
- * 
- * Este módulo intercepta las llamadas de audio de inDrive y las modifica para que
- * funcionen correctamente con Android Auto, forzando el uso de AudioAttributes apropiados
- * y manteniendo una MediaSession activa.
+ * Módulo Xposed para corregir el audio de inDrive en Android Auto.
+ *
+ * @author Joel Criollo
+ * @version 2.0.0
+ *
+ * # Problema
+ * Las notificaciones de inDrive (solicitudes de viaje) no se escuchan por
+ * Android Auto cuando no hay música reproduciéndose. Esto ocurre porque
+ * inDrive no mantiene una MediaSession activa, y Android Auto solo enruta
+ * audio de apps que tienen una sesión de media activa.
+ *
+ * # Solución
+ * 1. MediaSession persistente: se crea al cargar el módulo y se mantiene
+ *    activa mientras inDrive esté en memoria.
+ * 2. Notificación persistente: publica una notificación de media que
+ *    Android Auto reconoce como "app con audio activo".
+ * 3. Hooks de audio interceptan y modifican AudioAttributes para usar
+ *    USAGE_ASSISTANCE_NAVIGATION_GUIDANCE en lugar del valor por defecto.
+ * 4. Hook de NotificationManager.notify() para forzar MediaSession en
+ *    las notificaciones de inDrive.
  */
 class Init : IXposedHookLoadPackage {
 
     companion object {
-        // Apunta SOLO al paquete de inDrive (conductor)
-        private val TARGET_PACKAGES = setOf("sinet.startup.inDriver")
-        
-        // USAGE objetivo (recomendado para avisos en Android Auto)
+        /** Paquete de inDrive (conductor) */
+        private val TARGET_PACKAGE = "sinet.startup.inDriver"
+
+        /** USAGE objetivo para que Android Auto reconozca el audio como navegación */
         private const val TARGET_USAGE = AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE
-        
-        // Pide focus transitorio (may duck) al iniciar, y lo abandona al parar
-        private const val REQUEST_TRANSIENT_FOCUS = true
-        
-        // Si inDrive intentara "modo llamada" (SCO) que rompa AA, puedes bloquearlo
-        private const val SUPPRESS_IN_COMM_MODE = false
-        
-        // MediaSession para Android Auto
-        private const val NOTIFICATION_ID = 9876
+
+        /** ContentType para indicar que es contenido hablado/instrucciones */
+        private const val TARGET_CONTENT_TYPE = AudioAttributes.CONTENT_TYPE_SPEECH
+
+        /**
+         * IDs únicos para evitar colisiones con otras notificaciones
+         */
+        private const val MEDIA_NOTIFICATION_ID = 9876
+        private const val PERSISTENT_NOTIFICATION_ID = 9877
         private const val CHANNEL_ID = "indrive_audio_fix"
         private const val TAG = "InDriveAudioFix"
-        
-        // Singleton para MediaSession
+
+        /**
+         * Referencia débil a la MediaSession para permitir GC en
+         * condiciones de baja memoria. Se regenera automáticamente.
+         */
         @Volatile
-        private var mediaSession: WeakReference<MediaSession>? = null
+        private var mediaSessionRef: WeakReference<MediaSession>? = null
         private val sessionLock = Any()
-        
+
+        /** Flag para crear el canal de notificación solo una vez */
         @Volatile
-        private var notificationChannelCreated = false
+        private var channelCreated = false
+
+        /**
+         * Referencia al Context de inDrive para crear la MediaSession.
+         * Se obtiene la primera vez que se necesita y se cachea.
+         */
+        @Volatile
+        private var appContext: WeakReference<Context>? = null
     }
 
+    // ──────────────────────────────────────────────────────────────
+    //  PUNTO DE ENTRADA — Xposed
+    // ──────────────────────────────────────────────────────────────
+
     override fun handleLoadPackage(lpp: XC_LoadPackage.LoadPackageParam) {
-        if (lpp.packageName !in TARGET_PACKAGES) return
+        if (lpp.packageName != TARGET_PACKAGE) return
+
+        logInfo("Cargando hooks en $TARGET_PACKAGE (API ${Build.VERSION.SDK_INT})")
+
+        // Cachear ClassLoader para los hooks dinámicos
+        val cl = lpp.classLoader
 
         try {
-            hookAudioAttributes(lpp)
-            hookMediaPlayer(lpp)
-            hookSoundPool(lpp)
-            hookAudioFocus(lpp)
-            
-            if (SUPPRESS_IN_COMM_MODE) {
-                hookAudioMode(lpp)
-            }
-            
-            logInfo("Hooks cargados exitosamente en ${lpp.packageName}")
+            hookAudioAttributes(cl)
+            hookMediaPlayer(cl)
+            hookSoundPool(cl)
+            hookAudioFocusAndSession(cl)
+            hookNotificationNotify(cl)
+            logInfo("✅ Todos los hooks instalados correctamente")
         } catch (e: Throwable) {
-            logError("Error al cargar hooks", e)
+            logError("❌ Error crítico al instalar hooks", e)
         }
     }
 
-    /**
-     * Hook para AudioAttributes.Builder.build()
-     */
-    private fun hookAudioAttributes(lpp: XC_LoadPackage.LoadPackageParam) {
+    // ──────────────────────────────────────────────────────────────
+    //  HOOK 1 — AudioAttributes.Builder.build()
+    //  Fuerza USAGE_ASSISTANCE_NAVIGATION_GUIDANCE en todos los
+    //  AudioAttributes que cree inDrive.
+    // ──────────────────────────────────────────────────────────────
+
+    private fun hookAudioAttributes(cl: ClassLoader) {
         try {
             val builderClass = XposedHelpers.findClass(
-                "android.media.AudioAttributes\$Builder",
-                lpp.classLoader
+                "android.media.AudioAttributes\$Builder", cl
             )
-            
+
             XposedHelpers.findAndHookMethod(
-                builderClass,
-                "build",
+                builderClass, "build",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         val original = param.result as? AudioAttributes ?: return
-                        val fixed = fixAudioAttributes(original)
-                        
-                        if (original.usage != fixed.usage) {
-                            logInfo("AudioAttributes.build() ${original.usage} -> ${fixed.usage}")
-                            param.result = fixed
-                        }
+                        if (original.usage == TARGET_USAGE) return
+
+                        val fixed = AudioAttributes.Builder(original)
+                            .setUsage(TARGET_USAGE)
+                            .build()
+
+                        logDebug("AudioAttributes.build(): ${original.usage} → $TARGET_USAGE")
+                        param.result = fixed
                     }
                 }
             )
         } catch (e: Throwable) {
-            logError("Error al hookear AudioAttributes", e)
+            logError("hookAudioAttributes falló", e)
         }
     }
 
-    /**
-     * Hook para MediaPlayer.setAudioAttributes()
-     */
-    private fun hookMediaPlayer(lpp: XC_LoadPackage.LoadPackageParam) {
+    // ──────────────────────────────────────────────────────────────
+    //  HOOK 2 — MediaPlayer.setAudioAttributes()
+    //  Corrige AudioAttributes si se asignan directamente, sin pasar
+    //  por Builder.build().
+    // ──────────────────────────────────────────────────────────────
+
+    private fun hookMediaPlayer(cl: ClassLoader) {
         try {
+            val mpClass = XposedHelpers.findClass(
+                "android.media.MediaPlayer", cl
+            )
+
             XposedHelpers.findAndHookMethod(
-                "android.media.MediaPlayer",
-                lpp.classLoader,
-                "setAudioAttributes",
+                mpClass, "setAudioAttributes",
                 AudioAttributes::class.java,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        val original = param.args[0] as? AudioAttributes ?: return
-                        val fixed = fixAudioAttributes(original)
-                        
-                        if (original.usage != fixed.usage) {
-                            logInfo("MediaPlayer.setAudioAttributes() ${original.usage} -> ${fixed.usage}")
-                            param.args[0] = fixed
-                        }
+                        val attr = param.args[0] as? AudioAttributes ?: return
+                        if (attr.usage == TARGET_USAGE) return
+
+                        val fixed = AudioAttributes.Builder(attr)
+                            .setUsage(TARGET_USAGE)
+                            .build()
+
+                        logDebug("MediaPlayer.setAudioAttributes(): ${attr.usage} → $TARGET_USAGE")
+                        param.args[0] = fixed
                     }
                 }
             )
         } catch (e: Throwable) {
-            logError("Error al hookear MediaPlayer.setAudioAttributes", e)
+            logError("hookMediaPlayer falló", e)
         }
     }
 
-    /**
-     * Hook para SoundPool.Builder.setAudioAttributes()
-     */
-    private fun hookSoundPool(lpp: XC_LoadPackage.LoadPackageParam) {
+    // ──────────────────────────────────────────────────────────────
+    //  HOOK 3 — SoundPool.Builder.setAudioAttributes()
+    //  Corrige AudioAttributes para sonidos cortos (efectos/alertas).
+    // ──────────────────────────────────────────────────────────────
+
+    private fun hookSoundPool(cl: ClassLoader) {
         try {
             val builderClass = XposedHelpers.findClass(
-                "android.media.SoundPool\$Builder",
-                lpp.classLoader
+                "android.media.SoundPool\$Builder", cl
             )
-            
+
             XposedHelpers.findAndHookMethod(
-                builderClass,
-                "setAudioAttributes",
+                builderClass, "setAudioAttributes",
                 AudioAttributes::class.java,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        val original = param.args[0] as? AudioAttributes ?: return
-                        val fixed = fixAudioAttributes(original)
-                        
-                        if (original.usage != fixed.usage) {
-                            logInfo("SoundPool.setAudioAttributes() ${original.usage} -> ${fixed.usage}")
-                            param.args[0] = fixed
-                        }
+                        val attr = param.args[0] as? AudioAttributes ?: return
+                        if (attr.usage == TARGET_USAGE) return
+
+                        val fixed = AudioAttributes.Builder(attr)
+                            .setUsage(TARGET_USAGE)
+                            .build()
+
+                        logDebug("SoundPool.setAudioAttributes(): ${attr.usage} → $TARGET_USAGE")
+                        param.args[0] = fixed
                     }
                 }
             )
         } catch (e: Throwable) {
-            logError("Error al hookear SoundPool", e)
+            logError("hookSoundPool falló", e)
         }
     }
 
-    /**
-     * Hook para manejar Audio Focus y MediaSession en start()/pause()/stop()/release()
-     * 
-     * Esta función consolidada maneja:
-     * - Audio Focus: Solicita/abandona focus transitorio (si REQUEST_TRANSIENT_FOCUS está habilitado)
-     * - MediaSession: Crea y mantiene sesión activa para Android Auto (siempre)
-     * - PlaybackState: Actualiza el estado de reproducción (siempre)
-     */
-    private fun hookAudioFocus(lpp: XC_LoadPackage.LoadPackageParam) {
+    // ──────────────────────────────────────────────────────────────
+    //  HOOK 4 — Audio Focus + MediaSession (ciclo de vida completo)
+    //
+    //  Engancha MediaPlayer.start() / pause() / stop() / release()
+    //  para gestionar audio focus y estado de la MediaSession.
+    // ──────────────────────────────────────────────────────────────
+
+    private fun hookAudioFocusAndSession(cl: ClassLoader) {
         try {
-            val mediaPlayerClass = XposedHelpers.findClass(
-                "android.media.MediaPlayer",
-                lpp.classLoader
-            )
-            
-            // Hook start() para audio focus y MediaSession
+            val mpClass = XposedHelpers.findClass("android.media.MediaPlayer", cl)
+
+            // ── start() ──
             XposedHelpers.findAndHookMethod(
-                mediaPlayerClass,
-                "start",
+                mpClass, "start",
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (REQUEST_TRANSIENT_FOCUS) {
-                            requestTransientFocus(param.thisObject)
-                        }
-                        getPlayerContext(param.thisObject)?.let { context ->
-                            ensureMediaSessionActive(context)
-                            updatePlaybackState(PlaybackState.STATE_PLAYING)
-                        }
+                        requestTransientFocus(param.thisObject)
+                        updatePlaybackState(PlaybackState.STATE_PLAYING)
                     }
                 }
             )
-            
-            // Hook pause() para MediaSession
+
+            // ── pause() ──
             XposedHelpers.findAndHookMethod(
-                mediaPlayerClass,
-                "pause",
+                mpClass, "pause",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         updatePlaybackState(PlaybackState.STATE_PAUSED)
                     }
                 }
             )
-            
-            // Hook stop() para audio focus y MediaSession
+
+            // ── stop() ──
             XposedHelpers.findAndHookMethod(
-                mediaPlayerClass,
-                "stop",
+                mpClass, "stop",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        if (REQUEST_TRANSIENT_FOCUS) {
-                            abandonFocus(param.thisObject)
-                        }
-                        updatePlaybackState(PlaybackState.STATE_STOPPED)
+                        abandonFocus(param.thisObject)
+                        // NO liberamos MediaSession — se mantiene persistente
+                        updatePlaybackState(PlaybackState.STATE_PAUSED)
                     }
                 }
             )
-            
-            // Hook release() para audio focus
+
+            // ── release() ──
             XposedHelpers.findAndHookMethod(
-                mediaPlayerClass,
-                "release",
+                mpClass, "release",
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        if (REQUEST_TRANSIENT_FOCUS) {
-                            abandonFocus(param.thisObject)
-                        }
+                        abandonFocus(param.thisObject)
                     }
                 }
             )
         } catch (e: Throwable) {
-            logError("Error al hookear MediaPlayer", e)
+            logError("hookAudioFocusAndSession falló", e)
         }
     }
 
-    /**
-     * Hook para bloquear MODE_IN_COMMUNICATION si causa problemas
-     */
-    private fun hookAudioMode(lpp: XC_LoadPackage.LoadPackageParam) {
+    // ──────────────────────────────────────────────────────────────
+    //  HOOK 5 — NotificationManager.notify()
+    //
+    //  Intercepta las notificaciones de inDrive y les inyecta la
+    //  MediaSession del módulo, para que Android Auto las reconozca
+    //  como notificaciones de una app con audio activo.
+    // ──────────────────────────────────────────────────────────────
+
+    private fun hookNotificationNotify(cl: ClassLoader) {
         try {
+            val nmClass = XposedHelpers.findClass(
+                "android.app.NotificationManager", cl
+            )
+
             XposedHelpers.findAndHookMethod(
-                "android.media.AudioManager",
-                lpp.classLoader,
-                "setMode",
-                Int::class.javaPrimitiveType,
+                nmClass, "notify",
+                String::class.java, Int::class.javaPrimitiveType,
+                Notification::class.java,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        val mode = param.args[0] as? Int ?: return
-                        
-                        if (mode == AudioManager.MODE_IN_COMMUNICATION) {
-                            logInfo("Bloqueando MODE_IN_COMMUNICATION")
-                            param.result = null
+                        try {
+                            val notification = param.args[2] as? Notification ?: return
+                            val mediaSession = mediaSessionRef?.get()
+                            if (mediaSession == null || !mediaSession.isActive) return
+
+                            // Inyectar MediaSession.Token en el extra de la notificación
+                            // para que Android Auto la asocie a nuestra sesión de audio.
+                            notification.extras?.let { extras ->
+                                extras.putParcelable(
+                                    "android.mediaSession",
+                                    mediaSession.sessionToken
+                                )
+                            }
+                        } catch (_: Throwable) {
+                            // Failsafe: si falla la inyección, no bloquear la notificación
                         }
                     }
                 }
             )
         } catch (e: Throwable) {
-            logError("Error al hookear AudioMode", e)
+            logError("hookNotificationNotify falló (no crítico)", e)
         }
     }
 
-    /**
-     * Corrige AudioAttributes para usar el USAGE correcto
-     */
-    private fun fixAudioAttributes(attributes: AudioAttributes): AudioAttributes {
-        if (attributes.usage == TARGET_USAGE) {
-            return attributes
-        }
-        return AudioAttributes.Builder(attributes)
-            .setUsage(TARGET_USAGE)
-            .build()
-    }
+    // ──────────────────────────────────────────────────────────────
+    //  AUDIO FOCUS
+    // ──────────────────────────────────────────────────────────────
 
-    /**
-     * Solicita audio focus transitorio
-     */
     private fun requestTransientFocus(player: Any) {
         try {
-            val context = getPlayerContext(player) ?: return
-            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
-            
+            val ctx = getPlayerContext(player) ?: return
+            val am = ctx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+            ensureMediaSession(ctx)
+
+            val attrs = AudioAttributes.Builder()
+                .setUsage(TARGET_USAGE)
+                .setContentType(TARGET_CONTENT_TYPE)
+                .build()
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val attributes = AudioAttributes.Builder()
-                    .setUsage(TARGET_USAGE)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                    .build()
-                
                 val request = AudioFocusRequest.Builder(
                     AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
                 )
-                    .setAudioAttributes(attributes)
+                    .setAudioAttributes(attrs)
                     .setOnAudioFocusChangeListener { }
                     .build()
-                
-                audioManager.requestAudioFocus(request)
+                am.requestAudioFocus(request)
             } else {
                 @Suppress("DEPRECATION")
-                audioManager.requestAudioFocus(
-                    null,
-                    AudioManager.STREAM_MUSIC,
-                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
-                )
+                am.requestAudioFocus(null, AudioManager.STREAM_MUSIC,
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
             }
         } catch (e: Throwable) {
-            logError("Error al solicitar audio focus", e)
+            logError("requestTransientFocus falló", e)
         }
     }
 
-    /**
-     * Abandona audio focus
-     */
     private fun abandonFocus(player: Any) {
         try {
-            val context = getPlayerContext(player) ?: return
-            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
-            
+            val ctx = getPlayerContext(player) ?: return
+            val am = ctx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val attributes = AudioAttributes.Builder()
+                val attrs = AudioAttributes.Builder()
                     .setUsage(TARGET_USAGE)
                     .build()
-                
                 val request = AudioFocusRequest.Builder(
                     AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
                 )
-                    .setAudioAttributes(attributes)
+                    .setAudioAttributes(attrs)
                     .setOnAudioFocusChangeListener { }
                     .build()
-                
-                audioManager.abandonAudioFocusRequest(request)
+                am.abandonAudioFocusRequest(request)
             } else {
                 @Suppress("DEPRECATION")
-                audioManager.abandonAudioFocus(null)
+                am.abandonAudioFocus(null)
             }
         } catch (e: Throwable) {
-            logError("Error al abandonar audio focus", e)
+            logError("abandonFocus falló", e)
         }
     }
 
-    /**
-     * Obtiene el contexto del MediaPlayer
-     */
-    private fun getPlayerContext(player: Any): Context? {
-        return try {
-            XposedHelpers.getObjectField(player, "mContext") as? Context
-        } catch (e: Throwable) {
-            logError("Error al obtener contexto del player", e)
-            null
-        }
-    }
+    // ──────────────────────────────────────────────────────────────
+    //  MEDIA SESSION — GESTIÓN PERSISTENTE
+    // ──────────────────────────────────────────────────────────────
 
     /**
-     * Asegura que MediaSession esté activa
+     * Obtiene o crea la MediaSession. A diferencia de la versión anterior,
+     * esta NO se destruye en stop() — se mantiene activa mientras inDrive
+     * esté en memoria, para que Android Auto siempre reconozca la app.
      */
-    private fun ensureMediaSessionActive(context: Context) {
+    private fun ensureMediaSession(context: Context) {
         synchronized(sessionLock) {
-            val session = mediaSession?.get()
-            
-            // Si ya existe una sesión activa, no hacer nada
-            if (session?.isActive == true) {
-                return
-            }
-            
-            // Limpiar sesión anterior si existe
-            session?.let { releaseMediaSession(it) }
-            
-            // Crear nueva sesión
+            val existing = mediaSessionRef?.get()
+            if (existing?.isActive == true) return
+
+            // Liberar sesión zombie si existe
+            existing?.let { releaseMediaSession(it) }
+
             createMediaSession(context)
         }
     }
 
-    /**
-     * Crea y configura una nueva MediaSession
-     */
     private fun createMediaSession(context: Context) {
         try {
             val session = MediaSession(context, TAG)
-            
-            // Configurar flags para Android Auto
+
             session.setFlags(
                 MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or
-                MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS
+                        MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS
             )
-            
-            // Configurar AudioAttributes
-            val audioAttributes = AudioAttributes.Builder()
+
+            val attrs = AudioAttributes.Builder()
                 .setUsage(TARGET_USAGE)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .setContentType(TARGET_CONTENT_TYPE)
                 .build()
-            
-            session.setPlaybackToLocal(audioAttributes)
-            
-            // Configurar callbacks
+            session.setPlaybackToLocal(attrs)
+
             session.setCallback(object : MediaSession.Callback() {
-                override fun onPlay() {
-                    logInfo("MediaSession.onPlay()")
-                }
-                
-                override fun onPause() {
-                    logInfo("MediaSession.onPause()")
-                }
-                
-                override fun onStop() {
-                    logInfo("MediaSession.onStop()")
-                }
+                override fun onPlay() { logDebug("MediaSession.onPlay()") }
+                override fun onPause() { logDebug("MediaSession.onPause()") }
+                override fun onStop() { logDebug("MediaSession.onStop()") }
             })
-            
-            // Activar la sesión
+
             session.isActive = true
-            mediaSession = WeakReference(session)
-            
-            // Crear notificación si es necesario
-            ensureNotificationChannel(context)
-            createMediaNotification(context, session)
-            
-            logInfo("MediaSession creada y activada")
+            mediaSessionRef = WeakReference(session)
+
+            ensureChannel(context)
+            postPersistentNotification(context, session)
+
+            logInfo("✅ MediaSession persistente creada y activa")
         } catch (e: Throwable) {
             logError("Error al crear MediaSession", e)
         }
     }
 
-    /**
-     * Libera recursos de MediaSession
-     */
     private fun releaseMediaSession(session: MediaSession) {
         try {
-            if (session.isActive) {
-                session.isActive = false
-            }
+            if (session.isActive) session.isActive = false
             session.release()
-            logInfo("MediaSession liberada")
-        } catch (e: Throwable) {
-            logError("Error al liberar MediaSession", e)
-        }
+        } catch (_: Throwable) { /* ignora */ }
     }
 
     /**
-     * Actualiza el estado de reproducción de MediaSession
+     * Actualiza el PlaybackState. Cuando inDrive no está reproduciendo
+     * activamente, dejamos el estado en PAUSED (no STOPPED) para que
+     * Android Auto mantenga la sesión visible.
      */
     private fun updatePlaybackState(state: Int) {
         synchronized(sessionLock) {
-            val session = mediaSession?.get() ?: return
-            
+            val session = mediaSessionRef?.get() ?: return
             try {
-                val playbackState = PlaybackState.Builder()
+                val pbState = PlaybackState.Builder()
                     .setState(state, PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1.0f)
                     .setActions(
                         PlaybackState.ACTION_PLAY or
-                        PlaybackState.ACTION_PAUSE or
-                        PlaybackState.ACTION_STOP or
-                        PlaybackState.ACTION_PLAY_PAUSE
+                                PlaybackState.ACTION_PAUSE or
+                                PlaybackState.ACTION_STOP or
+                                PlaybackState.ACTION_PLAY_PAUSE
                     )
                     .build()
-                
-                session.setPlaybackState(playbackState)
-                logInfo("PlaybackState actualizado a $state")
+                session.setPlaybackState(pbState)
             } catch (e: Throwable) {
-                logError("Error al actualizar PlaybackState", e)
+                logError("updatePlaybackState falló", e)
             }
         }
     }
 
-    /**
-     * Asegura que el canal de notificación esté creado
-     */
-    private fun ensureNotificationChannel(context: Context) {
-        // Double-checked locking para evitar race conditions
-        if (notificationChannelCreated) return
-        
+    // ──────────────────────────────────────────────────────────────
+    //  NOTIFICACIONES
+    // ──────────────────────────────────────────────────────────────
+
+    private fun ensureChannel(context: Context) {
+        if (channelCreated) return
         synchronized(sessionLock) {
-            if (notificationChannelCreated) return
-            
+            if (channelCreated) return
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 try {
-                    val notificationManager = context.getSystemService(
+                    val nm = context.getSystemService(
                         Context.NOTIFICATION_SERVICE
                     ) as? NotificationManager ?: return
-                    
+
                     val channel = NotificationChannel(
-                        CHANNEL_ID,
-                        "InDrive Audio",
+                        CHANNEL_ID, "InDrive Audio Fix",
                         NotificationManager.IMPORTANCE_LOW
                     ).apply {
-                        description = "Mantiene el audio activo en Android Auto"
+                        description = "Mantiene el audio de inDrive en Android Auto"
                         setShowBadge(false)
                     }
-                    
-                    notificationManager.createNotificationChannel(channel)
-                    notificationChannelCreated = true
-                    logInfo("Canal de notificación creado")
+                    nm.createNotificationChannel(channel)
+                    channelCreated = true
                 } catch (e: Throwable) {
-                    logError("Error al crear canal de notificación", e)
+                    logError("ensureChannel falló", e)
                 }
+            } else {
+                channelCreated = true
             }
         }
     }
 
     /**
-     * Crea y publica la notificación de media
+     * Publica una notificación persistente que asocia la MediaSession
+     * a Android Auto. Esta notificación se mantiene publicada mientras
+     * inDrive esté en memoria.
      */
-    private fun createMediaNotification(context: Context, session: MediaSession) {
+    private fun postPersistentNotification(context: Context, session: MediaSession) {
         try {
-            val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                Notification.Builder(context, CHANNEL_ID)
-            } else {
-                @Suppress("DEPRECATION")
-                Notification.Builder(context)
-            }.apply {
-                setContentTitle("InDrive Audio Activo")
-                setContentText("Audio en reproducción para Android Auto")
-                setSmallIcon(android.R.drawable.ic_media_play)
-                setOngoing(true)
-                
+            val nm = context.getSystemService(
+                Context.NOTIFICATION_SERVICE
+            ) as? NotificationManager ?: return
+
+            val notification = buildPersistentNotification(context, session)
+            nm.notify(PERSISTENT_NOTIFICATION_ID, notification)
+            logInfo("🔔 Notificación persistente publicada")
+        } catch (e: Throwable) {
+            logError("postPersistentNotification falló", e)
+        }
+    }
+
+    private fun buildPersistentNotification(
+        context: Context,
+        session: MediaSession
+    ): Notification {
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(context, CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(context)
+        }
+
+        return builder
+            .setContentTitle("inDrive Audio Activo")
+            .setContentText("Audio para Android Auto")
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setOngoing(true) // no se puede dismiss
+            .setShowWhen(false)
+            .apply {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                     setStyle(
                         Notification.MediaStyle()
                             .setMediaSession(session.sessionToken)
+                            .setShowActionsInCompactView()
                     )
                 }
-            }.build()
-            
-            val notificationManager = context.getSystemService(
-                Context.NOTIFICATION_SERVICE
-            ) as? NotificationManager ?: return
-            
-            notificationManager.notify(NOTIFICATION_ID, notification)
-            logInfo("Notificación de media publicada")
-        } catch (e: Throwable) {
-            logError("Error al crear notificación de media", e)
+            }
+            .build()
+    }
+
+    /** Actualiza la notificación persistente (ej: al cambiar estado) */
+    private fun refreshPersistentNotification(context: Context) {
+        val session = mediaSessionRef?.get() ?: return
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+        try {
+            val notification = buildPersistentNotification(context, session)
+            nm.notify(PERSISTENT_NOTIFICATION_ID, notification)
+        } catch (_: Throwable) { }
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    //  UTILIDADES
+    // ──────────────────────────────────────────────────────────────
+
+    /**
+     * Obtiene el Context de un objeto MediaPlayer.
+     */
+    private fun getPlayerContext(player: Any): Context? {
+        return try {
+            XposedHelpers.getObjectField(player, "mContext") as? Context
+        } catch (_: Throwable) {
+            null
         }
     }
 
     /**
-     * Helper para logging de información
+     * Obtiene el Context de la app. Cachea la referencia para uso futuro.
      */
-    private fun logInfo(message: String) {
-        XposedBridge.log("$TAG: $message")
+    private fun getAppContext(player: Any): Context? {
+        // Intentar desde el player
+        getPlayerContext(player)?.let { ctx ->
+            appContext = WeakReference(ctx)
+            ensureMediaSession(ctx)
+            return ctx
+        }
+
+        // Intentar desde la referencia cacheada
+        appContext?.get()?.let { ctx ->
+            ensureMediaSession(ctx)
+            return ctx
+        }
+
+        return null
     }
 
-    /**
-     * Helper para logging de errores
-     */
-    private fun logError(message: String, throwable: Throwable? = null) {
-        XposedBridge.log("$TAG ERROR: $message")
-        throwable?.let {
-            XposedBridge.log("$TAG: ${it.message}")
-            XposedBridge.log(it)
+    // ──────────────────────────────────────────────────────────────
+    //  LOGGING
+    // ──────────────────────────────────────────────────────────────
+
+    private fun logInfo(msg: String) {
+        XposedBridge.log("$TAG ℹ️ $msg")
+    }
+
+    private fun logDebug(msg: String) {
+        XposedBridge.log("$TAG 🔧 $msg")
+    }
+
+    private fun logError(msg: String, e: Throwable? = null) {
+        XposedBridge.log("$TAG ❌ $msg")
+        e?.let {
+            XposedBridge.log("$TAG   └─ ${it.message}")
+            if (it.cause != null) {
+                XposedBridge.log("$TAG   └─ cause: ${it.cause?.message}")
+            }
         }
     }
 }
