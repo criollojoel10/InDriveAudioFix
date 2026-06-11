@@ -10,19 +10,6 @@ on:
     branches:
       - master
   workflow_dispatch:
-    inputs:
-      version_name:
-        description: 'Version name (e.g., 2.0.0)'
-        required: false
-        default: ''
-      build_type:
-        description: 'Build type'
-        required: true
-        default: 'debug'
-        type: choice
-        options:
-          - debug
-          - release
 
 jobs:
   build:
@@ -60,21 +47,11 @@ jobs:
       - name: 🔨 Build Debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: 🔨 Build Release APK (minified)
-        run: ./gradlew assembleRelease --no-daemon --stacktrace
-
       - name: 📦 Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: InDriveAudioFix-debug
           path: app/build/outputs/apk/debug/app-debug.apk
-          retention-days: 90
-
-      - name: 📦 Upload Release APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: InDriveAudioFix-release
-          path: app/build/outputs/apk/release/app-release.apk
           retention-days: 90
 
       - name: 🏷️ Extract version
@@ -93,22 +70,16 @@ jobs:
             ### Cambios
             Ver [CHANGELOG.md](CHANGELOG.md) para detalles completos.
 
-            ### Archivos
-            - `InDriveAudioFix-debug.apk` — Para instalación directa (sin minify)
-            - `InDriveAudioFix-release.apk` — Versión optimizada (con minify)
-
-            ### Instalación
+            ### 📲 Instalación
             1. Descarga el APK
             2. Instálalo en tu dispositivo
-            3. Activa el módulo en LSPosed
-            4. Selecciona **inDrive** como app objetivo
-            5. Reinicia inDrive
+            3. Activa el módulo en **LSPosed**
+            4. Selecciona **inDrive** (`sinet.startup.inDriver`) como app objetivo
+            5. Reinicia inDrive o el dispositivo
 
-            ### Soporte
-            - Reporta issues en: https://github.com/criollojoel10/InDriveAudioFix/issues
-          files: |
-            app/build/outputs/apk/debug/app-debug.apk
-            app/build/outputs/apk/release/app-release.apk
+            ### 🐛 Reportar issues
+            https://github.com/criollojoel10/InDriveAudioFix/issues
+          files: app/build/outputs/apk/debug/app-debug.apk
           generate_release_notes: true
           draft: false
           prerelease: false
